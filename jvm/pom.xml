@@ -6,11 +6,11 @@
 
   <groupId>com.ofdrwconverter</groupId>
   <artifactId>ofdrw-text-cli</artifactId>
-  <version>1.0.0</version>
+  <version>1.1.0</version>
   <packaging>jar</packaging>
 
   <name>ofdrw-text-cli</name>
-  <description>OFD -> plain text command line wrapper around ofdrw-converter TextExporter</description>
+  <description>OFD -> plain text command line tool with coordinate-based layout reconstruction</description>
 
   <properties>
     <maven.compiler.source>17</maven.compiler.source>

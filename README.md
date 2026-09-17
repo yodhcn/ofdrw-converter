@@ -2,7 +2,9 @@
 
 一个 **Dify 工具插件**：输入 OFD（开放版式文档）文件，导出为纯文本。
 
-底层直接使用 [OFDRW](https://github.com/ofdrw/ofdrw) 的
+底层使用 [OFDRW](https://github.com/ofdrw/ofdrw)：默认**按版面坐标重排文本**
+（自己的 `LayoutTextExtractor`，见 [为什么不能直接用 TextExporter](#为什么不能直接用-textexporter)），
+也可用 `mode=raw` 回退到 OFDRW 的
 [`TextExporter`](https://github.com/ofdrw/ofdrw/blob/master/ofdrw-converter/doc/EXPORTER.md)。
 
 > 插件**不需要发布**。本仓库即可直接本地安装/调试的插件工程，并通过脚本打包成
@@ -36,8 +38,8 @@ bin/runtime/bin/java          ← jlink 裁剪出的最小 Java 运行时（随�
         ▼
 bin/ofdrw-text-cli.jar        ← 自己写的命令行入口 + ofdrw 依赖（shade fat jar）
         │
-        ▼
-org.ofdrw.converter.export.TextExporter
+        ├── LayoutTextExtractor              ← 默认：按版面坐标重建阅读顺序
+        └── org.ofdrw.converter.export.TextExporter   ← --mode raw：历史行为
 ```
 
 - **自带运行时**：用 `jlink` 从 JDK 21 裁剪出 34.3 MB 的最小 JRE，放进插件包，用户无需安装 Java。
@@ -47,6 +49,45 @@ org.ofdrw.converter.export.TextExporter
 
 **为什么不用 JNI/JPype**：那会引入「Python 与 JVM 同进程」的兼容性与内存问题；
 独立进程模型最简单、最可靠，JVM 崩溃也不会拖垮插件进程。
+
+### 为什么不能直接用 TextExporter
+
+OFDRW 的 `TextExporter` 内部是 `ContentExtractor.getPageContent()` + 逐行 `println`，
+它的「切行」完全不看坐标，规则只有一条：**每个 `TextCode` 打印成一行**。
+
+而现实中的 OFD 大量存在「一个字（或一两个词）一个 `TextObject`」的排版方式
+（增值税发票、公文、银行回单都很常见）。这类文档用 `TextExporter` 导出的结果会被
+打散成一堆只含一两个字符的短行，例如：
+
+```
+1
+- 
+202
+6
+```
+
+本项目自带的样本里这个现象非常明显，`TextExporter` 的输出与按坐标重排后的对比如下：
+
+| 样本 | 对象数 | `TextExporter` 行数 | 按坐标重排行数 |
+| --- | --- | --- | --- |
+| `999.ofd`（5 页发票） | 560 | 560 | **137** |
+| `draw_param_ref.ofd`（5 页发票） | 870 | 873 | **146** |
+| `SignScaleError.ofd`（发票） | 68 | 68 | **25** |
+| `z.ofd`（OFD 标准文档节选） | 57 | 60 | **40** |
+
+`LayoutTextExtractor` 的做法是先把每个文字对象展开成**逐个字符的图元**，再用字符自身
+的坐标还原版面。依据（都已在真实样本上核对过）：
+
+- `TextObject.Boundary` 是**页面坐标系**下的外接矩形（毫米）；
+- `TextCode.X/Y` 是相对该对象原点的偏移，`Y` 可视为基线偏移；
+- `TextCode.DeltaX/DeltaY` 是逐字的步进量，**其累加值恰好等于文本宽度**
+  （例如 `50.04 = 4×5.57 + 4×2.77 + 5.57 + 2×2.77 + 5.57`），因此既能算出每个字的
+  横坐标，也能识别对象内部的换行；
+- `CTM` 非单位矩阵时坐标系发生旋转/缩放，此时**不做逐字展开**，退化为
+  「整个对象按 `Boundary` 当一个图块」处理，避免算出错误的字符坐标。
+
+然后把图元按 y 聚类成行（容差 = 0.35 × 中位字高）、行内按 x 排序，相邻字符间隙超过
+0.3 × 字高时补一个空格（表格列之间因此会自然分开），最后按 y 输出整页的行。
 
 ### 体积约束（重要）
 
@@ -74,8 +115,8 @@ Dify 对插件包大小有上限，**默认是解压后 50 MB**，且客户端�
 1. **BouncyCastle 不能剔除**。`OFDReader` 初始化时会注册 SM3 摘要算法，
    去掉后会直接 `NoClassDefFoundError: org/bouncycastle/jcajce/provider/digest/SM3$Digest`，
    任何 OFD 都打不开。
-2. **`java.desktop` 不需要**。`TextExporter` 走的是 `ContentExtractor`，
-   只从 XML 里读文本内容（`TextCode.getContent()`），不做任何字体渲染或图形处理。
+2. **`java.desktop` 不需要**。文本抽取只从 XML 里读文本内容（`TextCode.getContent()`）
+   与坐标（`Boundary` / `DeltaX`），不做任何字体渲染或图形处理。
    加上它会让运行时从 34 MB 涨到 46 MB。`jdeps` 会提示需要 `java.desktop`，
    那是因为 jar 里还留着 `ofdrw-graphics2d`、`ofdrw-font`、`ujmp` 等
    只在渲染/导出路径上才加载的类——它们不会被 `TextExporter` 触达。
@@ -119,7 +160,9 @@ ofdrw-converter/
 │   └── runtime/                  #   jlink 生成的最小 Java 运行时
 ├── jvm/                          # Java 命令行工程源码
 │   ├── pom.xml
-│   └── src/main/java/com/ofdrwconverter/cli/Main.java
+│   └── src/main/java/com/ofdrwconverter/cli/
+│       ├── Main.java                 # CLI 入口（参数解析 / 结果 JSON / 模式分派）
+│       └── LayoutTextExtractor.java  # 按版面坐标重建阅读顺序的抽取器
 ├── scripts/
 │   ├── build.ps1                 # 构建 jar + 生成运行时（Windows）
 │   ├── build.sh                  # 同上，Linux / macOS / Git Bash（CI 走这条）
@@ -168,14 +211,18 @@ python -m venv .venv
 .venv/Scripts/python.exe scripts/validate.py
 ```
 
-校验 4 件事：
+校验 5 件事：
 
 1. 用官方 SDK 的 Pydantic 模型校验 `manifest.yaml` / provider / tool 三个清单；
 2. 清单引用的 Python 源文件是否都存在；
-3. 自带 Java 运行时与 jar 是否就绪，并走一遍真实转换（Python → 自带 JRE → jar → TextExporter）；
-4. `samples/*.ofd` 全量批量回归，打印每个样本的页数/字符数/耗时。
+3. 自带 Java 运行时与 jar 是否就绪，并走一遍真实转换（Python → 自带 JRE → jar → 版面重排抽取）；
+4. `samples/*.ofd` 全量批量回归，打印每个样本的页数/字符数/耗时；
+5. **`layout` / `raw` 一致性回归**：两种模式输出的「非空白字符多重集」必须完全相同，
+   且 `layout` 的行数不能变多。这是防「静默丢字/错字」的硬约束——
+   `layout` 是重写过的抽取逻辑，抽查几行输出根本发现不了少一个字。
 
-最近一次结果：`12 个样本全部跑通`，其中 `h.ofd` 为整页图片文档，正确返回空文本提示而非报错。
+最近一次结果：`12 个样本全部跑通`，一致性回归为 `字符集完全一致，行数合计 1695 -> 421`。
+其中 `h.ofd` 为整页图片文档，正确返回空文本提示而非报错。
 
 > 若环境里没有样例文件（例如 CI 未提交 `samples/`），加 `--no-sample` 跳过第 3、4 步。
 
@@ -299,6 +346,7 @@ python -m main
 | --- | --- | --- | --- |
 | `ofd_file` | file | 是 | 待转换的 OFD 文档 |
 | `pages` | string | 否 | 要导出的页码，**从 1 开始**，支持 `1,3,5-7`；留空导出全部页 |
+| `mode` | select | 否 | `layout`（默认）按版面坐标重排，输出接近人工阅读的分行；`raw` 每个文本块各占一行（旧行为，用于对照排查） |
 | `attach_file` | boolean | 否 | 是否额外返回可下载的 `.txt` 文件，默认 `false` |
 | `max_chars` | number | 否 | 文本消息截断长度，`0` 表示不限制（默认） |
 
@@ -309,8 +357,14 @@ python -m main
 | 变量 | 内容 |
 | --- | --- |
 | `text` | 提取到的纯文本。若文档无法提取文本，则返回一段说明性提示 |
-| `json` | 元信息：`page_count`、`char_count`、`line_count`、`elapsed_ms`、`truncated`、`ignored_pages`、`java` 等 |
+| `json` | 元信息：`mode`、`page_count`、`char_count`、`line_count`、`glyph_count`、`unpositioned_objects`、`elapsed_ms`、`truncated`、`ignored_pages`、`java` 等 |
 | `files` | 仅当 `attach_file=true` 时存在，为 UTF-8 编码的 `.txt` 文件 |
+
+`layout` 模式下另有两个诊断字段：
+
+- `glyph_count`：展开出的字符图元总数（近似「有多少个字参与了排版」）；
+- `unpositioned_objects`：因缺少坐标信息（没有 `Boundary`，或 `CTM` 是旋转/缩放矩阵）
+  只能整块处理的对象数。这个数字偏大时，说明该文档的坐标系比较特殊，输出可信度会下降。
 
 ## 命令行入口
 
@@ -318,22 +372,31 @@ Java CLI 也可以脱离 Dify 单独使用：
 
 ```
 java -jar ofdrw-text-cli.jar --input <file.ofd> [--output <out.txt>]
-                             [--pages 1,3,5-7] [--result <result.json>]
+                             [--pages 1,3,5-7] [--mode layout|raw]
+                             [--result <result.json>]
 ```
 
 - 成功时向 stdout 与 `--result` 写出一行 JSON（`{"ok":true,...}`），非 ASCII 一律转义，控制台编码无关。
 - 退出码：`0` 成功、`1` 转换失败、`2` 参数错误。
 - 输出文本统一为 UTF-8 + LF，跨平台一致。
 
-## 已知限制
+对比两种模式（排查「文字为什么碎成这样」时很有用）：
 
-这些限制来自 `TextExporter` 本身，不是插件引入的：
+```bash
+java -jar ofdrw-text-cli.jar -i doc.ofd -o layout.txt --mode layout
+java -jar ofdrw-text-cli.jar -i doc.ofd -o raw.txt    --mode raw
+```
+
+## 已知限制
 
 - **并非所有 OFD 都能导出文本**：整页由图片构成、整页为矢量路径图元、
   或使用字形索引（glyph id）而非 Unicode 定位文字的 OFD，无法提取出文本。
   此时 `text` 会返回提示语，`json.empty` 为 `true`。
-- **文本顺序可能与原文不一致**：版式文档的文本流依赖排版信息，导出顺序不保证阅读顺序。
+- **多栏排版仍会被逐行合并**：`layout` 模式按 y 聚类成行，双栏文档（如论文）的左右栏
+  内容会在同一行里交替出现。竖排文字会输出为单字行。这类文档建议 `layout` / `raw` 对照后取舍。
 - **不支持加密/带口令的 OFD**。
+- **单个文字对象内部的换行只能按 `DeltaY` 还原**：若生成器不写 `DeltaY`，
+  对象内部实际换行的地方会被合并成一行（`raw` 模式同样如此）。
 
 ## 换平台 / 升级
 

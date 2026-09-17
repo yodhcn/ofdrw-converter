@@ -6,9 +6,9 @@ identity:
     zh_Hans: OFD 转纯文本
 description:
   human:
-    en_US: Export an OFD (Open Fixed-layout Document) file to plain text using the OFDRW TextExporter. Returns the extracted text, document metadata, and optionally a downloadable .txt file.
-    zh_Hans: 使用 OFDRW TextExporter 将 OFD（开放版式文档）文件导出为纯文本。返回提取到的文本、文档元信息，可选返回可下载的 .txt 文件。
-  llm: Extract the plain text content of an OFD (Open Fixed-layout Document) file. Returns the extracted text plus metadata such as page count and character count, and optionally a downloadable .txt file. Note that some OFD pages are composed only of images or vector path data and therefore cannot yield any text.
+    en_US: Export an OFD (Open Fixed-layout Document) file to plain text using the OFDRW library. By default the text is re-laid out from the page coordinates, so text runs that were split into many tiny objects are merged back into readable lines. Returns the extracted text, document metadata, and optionally a downloadable .txt file.
+    zh_Hans: 将 OFD（开放版式文档）文件导出为纯文本（基于 OFDRW）。默认按版面坐标还原阅读顺序，把被拆散成大量短碎片的文字重新合并成可读的行。返回提取到的文本、文档元信息，可选返回可下载的 .txt 文件。
+  llm: Extract the plain text content of an OFD (Open Fixed-layout Document) file. The text is reconstructed from the page coordinates so that lines read in normal order. Returns the extracted text plus metadata such as page count and character count, and optionally a downloadable .txt file. Note that some OFD pages are composed only of images or vector path data and therefore cannot yield any text.
 parameters:
   - name: ofd_file
     type: file
@@ -33,6 +33,28 @@ parameters:
       zh_Hans: "要导出的页码，从 1 开始，支持列表与区间，如 1,3,5-7。留空表示导出全部页。"
     llm_description: "Pages to export, 1-based, for example '1,3,5-7'. Leave empty to export the whole document."
     form: llm
+
+  - name: mode
+    type: select
+    required: false
+    default: layout
+    options:
+      - value: layout
+        label:
+          en_US: Rebuild layout (recommended)
+          zh_Hans: 按版面重排（推荐）
+      - value: raw
+        label:
+          en_US: Raw text runs
+          zh_Hans: 原始文本块
+    label:
+      en_US: Extraction mode
+      zh_Hans: 抽取模式
+    human_description:
+      en_US: "Rebuild layout sorts and merges text by its page coordinates, giving lines that read in normal order. Raw text runs keeps the original behaviour: every text run in the file becomes its own line, which is useful for troubleshooting."
+      zh_Hans: "按版面重排会依据文字在页面上的坐标排序与合并，输出接近人工阅读的分行；原始文本块保留旧行为——文件里每个文本块各自占一行，便于排查问题。"
+    llm_description: "Text extraction mode: 'layout' rebuilds lines from page coordinates (default), 'raw' emits every text run on its own line."
+    form: form
 
   - name: attach_file
     type: boolean

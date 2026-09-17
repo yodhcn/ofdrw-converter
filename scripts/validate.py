@@ -1,10 +1,12 @@
 """本地校验脚本：不依赖 Dify 实例，直接验证插件清单与转换链路。
 
-做四件事：
+做五件事：
   1. 用 dify-plugin SDK 的 Pydantic 模型校验 manifest / provider / tool 三个 YAML；
   2. 检查自带 Java 运行时与 jar 是否就绪；
-  3. 走一遍真实的 TextExporter 转换（Python -> 自带 Java 运行时 -> jar）；
-  4. 把 samples/*.ofd 全部跑一遍，作为「瘦身后依赖是否够用」的回归测试。
+  3. 走一遍真实的转换（Python -> 自带 Java 运行时 -> jar -> LayoutTextExtractor）；
+  4. 把 samples/*.ofd 全部跑一遍，作为「瘦身后依赖是否够用」的回归测试；
+  5. 对每个样本同时跑 layout 与 raw 两种模式，断言 layout 只做「重排」：
+     非空白字符的多重集必须与 raw 完全一致（不增、不删、不改字），且行数不应变多。
 
 用法:
     .venv\\Scripts\\python.exe scripts\\validate.py [样例.ofd]
@@ -17,6 +19,7 @@ import argparse
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -185,6 +188,61 @@ def run_batch() -> str:
     return f"{len(files)} 个样本全部跑通"
 
 
+def run_consistency() -> str:
+    """layout 模式的一致性回归：相对 raw 只能「重排」，不能动到正文内容。
+
+    layout 是重写过的抽取逻辑，最大的风险是**静默丢字或错字**——这类问题在
+    抽查几行输出时很难发现。这里对每个样本跑两种模式，用「非空白字符的多重集」
+    做严格比对：它允许换行与空格变化（那正是 layout 要做的事），
+    但只要少一个字、多一个字或写错一个字，多重集就会不等。
+    """
+    from ofdrw_cli import MODE_LAYOUT, MODE_RAW, convert_to_text
+
+    files = sorted((PLUGIN_ROOT / "samples").glob("*.ofd"))
+    if not files:
+        return "samples 目录下没有 .ofd，跳过"
+
+    print(f"      {'文件':<26} {'raw行':>6} {'lay行':>6} {'非空白字符':>10}  结果")
+    failed: list[str] = []
+    raw_total = lay_total = 0
+    for f in files:
+        with tempfile.TemporaryDirectory(prefix="ofdrw-consistency-") as tmp:
+            try:
+                raw = convert_to_text(f, Path(tmp) / "raw.txt", mode=MODE_RAW)
+                lay = convert_to_text(f, Path(tmp) / "layout.txt", mode=MODE_LAYOUT)
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"{f.name}: 转换异常 {e}")
+                print(f"      {f.name:<26} {'-':>6} {'-':>6} {'-':>10}  失败: {e}")
+                continue
+
+            counter_raw = Counter(c for c in raw["text"] if not c.isspace())
+            counter_lay = Counter(c for c in lay["text"] if not c.isspace())
+            raw_lines = raw["meta"]["line_count"] or 0
+            lay_lines = lay["meta"]["line_count"] or 0
+            raw_total += raw_lines
+            lay_total += lay_lines
+
+            problems = []
+            if counter_raw != counter_lay:
+                lost = (counter_raw - counter_lay).most_common(5)
+                added = (counter_lay - counter_raw).most_common(5)
+                problems.append(f"字符集不一致 丢失={lost} 多出={added}")
+            if lay_lines > raw_lines:
+                problems.append(f"行数变多 {raw_lines} -> {lay_lines}")
+
+            if problems:
+                failed.append(f"{f.name}: {'; '.join(problems)}")
+                note = "❌ " + problems[0]
+            else:
+                note = "OK"
+            print(f"      {f.name:<26} {raw_lines:>6} {lay_lines:>6} "
+                  f"{sum(counter_lay.values()):>10}  {note}")
+
+    if failed:
+        raise AssertionError(f"{len(failed)} 个样本未通过一致性校验: {failed}")
+    return f"{len(files)} 个样本字符集完全一致，行数合计 {raw_total} -> {lay_total}"
+
+
 def main() -> int:
     sample = Path(sys.argv[1]) if len(sys.argv) > 1 else PLUGIN_ROOT / "samples" / "999.ofd"
 
@@ -215,6 +273,8 @@ def main() -> int:
         print("      已指定 --no-sample，跳过")
         print("\n=== 4. 多样本回归 ===")
         print("      已指定 --no-sample，跳过")
+        print("\n=== 5. layout/raw 一致性回归 ===")
+        print("      已指定 --no-sample，跳过")
     else:
         sample = Path(args.sample) if args.sample else PLUGIN_ROOT / "samples" / "999.ofd"
 
@@ -228,6 +288,9 @@ def main() -> int:
 
         print("\n=== 4. 多样本回归 ===")
         ok = check("samples/*.ofd 批量转换", run_batch) and ok
+
+        print("\n=== 5. layout/raw 一致性回归 ===")
+        ok = check("两种模式的内容一致性", run_consistency) and ok
 
     print()
     print("全部通过 ✅" if ok else "存在失败项 ❌")

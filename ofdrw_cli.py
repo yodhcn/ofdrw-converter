@@ -4,7 +4,15 @@
 工具代码只需要关心参数与返回值。
 
 调用链：Dify 工具(Python) -> bin/runtime/bin/java -> bin/ofdrw-text-cli.jar
-        -> org.ofdrw.converter.export.TextExporter
+        -> LayoutTextExtractor（默认，按版式坐标还原阅读顺序）
+        -> org.ofdrw.converter.export.TextExporter（--mode raw，历史行为）
+
+关于抽取模式
+------------
+``layout``（默认）不直接用``TextExporter``，因为它只是「每个 TextCode 打印一行」，
+切行不看坐标；而实际 OFD 里大量存在「一个字一个 TextObject」的排版，导出结果会被
+打散成大量只含一两个字符的短行。``layout`` 改为按坐标重建版面（详见 Java 侧
+``LayoutTextExtractor``），``raw`` 保留旧行为以便对照排查。
 
 关于可执行位
 ------------
@@ -36,6 +44,11 @@ _JAVA_EXE = "java.exe" if os.name == "nt" else "java"
 BUNDLED_JAVA = BIN_DIR / "runtime" / "bin" / _JAVA_EXE
 
 DEFAULT_TIMEOUT = int(os.environ.get("OFDRW_TIMEOUT", "180"))
+
+# 文本抽取模式：layout = 按版式坐标还原阅读顺序（默认）；raw = 每个 TextCode 一行。
+MODE_LAYOUT = "layout"
+MODE_RAW = "raw"
+MODES = (MODE_LAYOUT, MODE_RAW)
 
 # 运行时被复制到临时目录时，上一次复制的结果可以复用（按进程缓存）。
 _EXEC_CACHE: dict[str, str] = {}
@@ -207,10 +220,11 @@ def _java_command(
     txt_path: Path,
     result_path: Path,
     pages: str | None,
+    mode: str,
 ) -> list[str]:
     cmd = [
         java,
-        # TextExporter 内部使用 JVM 默认字符集写文件，这里固定为 UTF-8，避免中文乱码。
+        # 内部按 UTF-8 写文件，这里固定为 UTF-8，避免中文乱码。
         "-Dfile.encoding=UTF-8",
         "-Dsun.jnu.encoding=UTF-8",
         # 纯文本提取不需要图形环境，强制 headless 以避免无显示环境下初始化 AWT 失败。
@@ -223,10 +237,18 @@ def _java_command(
         str(txt_path),
         "--result",
         str(result_path),
+        "--mode",
+        mode,
     ]
     if pages:
         cmd += ["--pages", pages]
     return cmd
+
+
+def normalize_mode(value: Any) -> str:
+    """把用户输入归一化为合法模式；无法识别时回落到 layout。"""
+    text = str(value or "").strip().lower()
+    return text if text in MODES else MODE_LAYOUT
 
 
 def convert_to_text(
@@ -234,6 +256,7 @@ def convert_to_text(
     txt_path: Path,
     *,
     pages: str | None = None,
+    mode: str = MODE_LAYOUT,
     timeout: int | None = None,
 ) -> dict[str, Any]:
     """把 OFD 文件转换为 UTF-8 纯文本。
@@ -241,17 +264,19 @@ def convert_to_text(
     :param ofd_path: 输入 OFD 文件路径
     :param txt_path: 输出纯文本路径
     :param pages: 页码表达式（1 起，支持 ``1,3,5-7``），None 表示全部页
+    :param mode: ``layout``（默认，按版式坐标还原阅读顺序）或 ``raw``
     :param timeout: 子进程超时时间（秒）
     :return: 包含 ``text`` 与 ``meta`` 的字典
     """
     if not JAR_PATH.is_file():
         raise OfdrwCliError(f"缺少转换程序: {JAR_PATH}")
 
+    mode = normalize_mode(mode)
     java = resolve_java()
     result_path = txt_path.with_suffix(txt_path.suffix + ".result.json")
     timeout = timeout or DEFAULT_TIMEOUT
 
-    cmd = _java_command(java, ofd_path, txt_path, result_path, pages)
+    cmd = _java_command(java, ofd_path, txt_path, result_path, pages, mode)
 
     try:
         proc = subprocess.run(
@@ -286,6 +311,7 @@ def convert_to_text(
     text = output_path.read_text(encoding="utf-8", errors="replace")
 
     meta = {
+        "mode": payload.get("mode") or mode,
         "page_count": payload.get("pageCount"),
         "exported_page_count": payload.get("exportedPageCount"),
         "char_count": payload.get("charCount"),
@@ -297,6 +323,12 @@ def convert_to_text(
         "cli_version": payload.get("version"),
         "java": java,
     }
+    # layout 模式额外给出排版诊断信息：展开出的字符图元数，以及因缺坐标信息
+    # （无 Boundary / 旋转 CTM，如某些采用字形索引或畸变坐标系的 OFD）
+    # 而只能按整块处理的对象数。
+    if payload.get("glyphCount") is not None:
+        meta["glyph_count"] = payload.get("glyphCount")
+        meta["unpositioned_objects"] = payload.get("unpositionedObjects")
     if not meta["empty"] and not text.strip():
         meta["empty"] = True
 

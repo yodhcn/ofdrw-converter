@@ -5,8 +5,8 @@ identity:
     en_US: OFDRW Converter
     zh_Hans: OFDRW 文档转换
   description:
-    en_US: Export OFD (Open Fixed-layout Document) files to plain text with the OFDRW TextExporter. The plugin ships with its own Java runtime.
-    zh_Hans: 使用 OFDRW TextExporter 将 OFD（开放版式文档）导出为纯文本，插件自带 Java 运行时。
+    en_US: Export OFD (Open Fixed-layout Document) files to plain text based on OFDRW. Text is re-laid out from the page coordinates by default, so fragmented text runs are merged into readable lines. The plugin ships with its own Java runtime.
+    zh_Hans: 基于 OFDRW 将 OFD（开放版式文档）导出为纯文本，默认按版面坐标还原阅读顺序，把被拆散的文本碎片合并成可读的行。插件自带 Java 运行时。
   icon: icon.svg
   tags:
     - utilities

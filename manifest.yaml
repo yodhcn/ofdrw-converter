@@ -1,4 +1,4 @@
-version: 0.0.2
+version: 0.0.3
 type: plugin
 author: ofdrw
 name: ofdrw-converter
@@ -6,8 +6,8 @@ label:
   en_US: OFDRW Converter
   zh_Hans: OFDRW 文档转换
 description:
-  en_US: Export OFD (Open Fixed-layout Document) files to plain text using the OFDRW TextExporter. A bundled Java runtime is included, no external Java installation required.
-  zh_Hans: 基于 OFDRW TextExporter 将 OFD（开放版式文档）导出为纯文本。插件内置 Java 运行时，无需另行安装 Java。
+  en_US: Export OFD (Open Fixed-layout Document) files to plain text based on OFDRW. Text is re-laid out from the page coordinates by default, so fragmented text runs are merged back into readable lines. A bundled Java runtime is included, no external Java installation required.
+  zh_Hans: 基于 OFDRW 将 OFD（开放版式文档）导出为纯文本。默认按版面坐标还原阅读顺序，把被拆散的文本碎片重新合并成可读的行。插件内置 Java 运行时，无需另行安装 Java。
 icon: icon.svg
 icon_dark: icon-dark.svg
 repo: https://github.com/ofdrw/ofdrw-converter
@@ -22,7 +22,8 @@ plugins:
     - provider/ofdrw-converter.yaml
 meta:
   # 0.0.2：修复包内缺少 Unix 权限位导致自带 java 无法 exec（Permission denied）
-  version: 0.0.2
+  # 0.0.3：默认改用按版面坐标重排的抽取（修复「一字一行」的文本碎片化）
+  version: 0.0.3
   arch:
     - amd64
   runner:

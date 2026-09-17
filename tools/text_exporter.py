@@ -13,7 +13,7 @@ _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
-from ofdrw_cli import OfdrwCliError, convert_to_text  # noqa: E402
+from ofdrw_cli import OfdrwCliError, convert_to_text, normalize_mode  # noqa: E402
 
 EMPTY_TEXT_HINT = (
     "导出结果为空：该 OFD 文档可能整页由图片或矢量路径图元构成，"
@@ -22,13 +22,14 @@ EMPTY_TEXT_HINT = (
 
 
 class TextExporterTool(Tool):
-    """输入 OFD 文件，导出纯文本（OFDRW TextExporter）。"""
+    """输入 OFD 文件，导出纯文本（默认按版式坐标还原阅读顺序）。"""
 
     def _invoke(
         self, tool_parameters: dict[str, Any]
     ) -> Generator[ToolInvokeMessage, None, None]:
         ofd_file = self._resolve_file(tool_parameters.get("ofd_file"))
         pages = self._normalize_pages(tool_parameters.get("pages"))
+        mode = normalize_mode(tool_parameters.get("mode"))
         max_chars = self._safe_int(tool_parameters.get("max_chars"), 0)
         attach_file = bool(tool_parameters.get("attach_file"))
 
@@ -52,7 +53,7 @@ class TextExporterTool(Tool):
             src.write_bytes(blob)
 
             try:
-                result = convert_to_text(src, dst, pages=pages)
+                result = convert_to_text(src, dst, pages=pages, mode=mode)
             except OfdrwCliError as e:
                 raise RuntimeError(str(e)) from e
 
@@ -80,6 +81,7 @@ class TextExporterTool(Tool):
                 "file_name": filename,
                 "file_size": len(blob),
                 "requested_pages": pages or "all",
+                "requested_mode": mode,
                 "returned_char_count": len(text),
                 "truncated": truncated,
             }
