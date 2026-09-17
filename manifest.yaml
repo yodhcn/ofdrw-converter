@@ -1,0 +1,30 @@
+version: 0.0.1
+type: plugin
+author: ofdrw
+name: ofdrw-converter
+label:
+  en_US: OFDRW Converter
+  zh_Hans: OFDRW 文档转换
+description:
+  en_US: Export OFD (Open Fixed-layout Document) files to plain text using the OFDRW TextExporter. A bundled Java runtime is included, no external Java installation required.
+  zh_Hans: 基于 OFDRW TextExporter 将 OFD（开放版式文档）导出为纯文本。插件内置 Java 运行时，无需另行安装 Java。
+icon: icon.svg
+icon_dark: icon-dark.svg
+repo: https://github.com/ofdrw/ofdrw-converter
+created_at: 2026-09-15T00:00:00Z
+resource:
+  memory: 268435456
+  permission:
+    tool:
+      enabled: true
+plugins:
+  tools:
+    - provider/ofdrw-converter.yaml
+meta:
+  version: 0.0.1
+  arch:
+    - amd64
+  runner:
+    language: python
+    version: "3.12"
+    entrypoint: main

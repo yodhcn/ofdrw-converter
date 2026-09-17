@@ -1,0 +1,175 @@
+name: Repackage Dify Plugin
+
+# 手工触发，产出「离线可安装」的 .difypkg。
+#
+# 产物只做 Linux：Dify 的 plugin_daemon 跑在 Linux 容器里，插件包内自带的
+# Java 运行时（jlink 产物）是平台相关的，只有 Linux 版才能在容器里起来。
+# 所以这里固定在 Linux runner 上重新编译 fat jar、用 jlink 生成 Linux 运行时，
+# 再打离线包（Python wheel 也按目标架构交叉下载）。
+# platform_arm=false -> linux-amd64，true -> linux-arm64。
+on:
+  workflow_dispatch:
+    inputs:
+      platform_arm:
+        description: "Use ARM platform (true OR false)"
+        required: true
+        type: string
+        default: "false"
+
+permissions:
+  contents: read
+
+# dify-plugin-daemon 的 release 里带 CLI 二进制（dify-plugin-linux-amd64 / -arm64）。
+env:
+  DIFY_CLI_VERSION: "0.6.10"
+
+jobs:
+  package:
+    runs-on: ${{ inputs.platform_arm == 'true' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    env:
+      # 目标平台：决定 jlink 产出的运行时、交叉下载的 wheel、以及 manifest 的 meta.arch
+      TARGET_ARCH: ${{ inputs.platform_arm == 'true' && 'arm64' || 'amd64' }}
+      PLATFORM: linux-${{ inputs.platform_arm == 'true' && 'arm64' || 'amd64' }}
+      ARTIFACT_NAME: ofdrw-converter-offline-linux-${{ inputs.platform_arm == 'true' && 'arm64' || 'amd64' }}
+      # 用 glob 而不是写死插件名：仓库目录名变了也不会对不上
+      ARTIFACT_PATH: |
+        dist/*-offline-${{ inputs.platform_arm == 'true' && 'arm64' || 'amd64' }}.difypkg
+        dist/SHA256SUMS.txt
+
+    steps:
+      - name: Print workflow inputs
+        run: |
+          echo "platform_arm   = ${{ inputs.platform_arm }}"
+          echo "runner.os      = ${{ runner.os }}"
+          echo "runner.arch    = ${{ runner.arch }}"
+          echo "target platform= $PLATFORM (arch=$TARGET_ARCH)"
+          echo "dify cli       = $DIFY_CLI_VERSION"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          # 与 manifest.yaml 的 meta.runner.version 保持一致
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dify plugin CLI
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 -o "$HOME/.local/bin/dify" \
+            "https://github.com/langgenius/dify-plugin-daemon/releases/download/${DIFY_CLI_VERSION}/dify-plugin-linux-${TARGET_ARCH}"
+          chmod +x "$HOME/.local/bin/dify"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/dify" version
+
+      - name: Install Python dependencies for validation
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # requirements.txt 是插件运行时依赖；pyyaml 只有校验脚本用得到
+          python -m pip install -r requirements.txt pyyaml
+
+      - name: Build fat jar and bundled Java runtime
+        run: bash scripts/build.sh
+
+      - name: Validate plugin (manifest + end-to-end + samples)
+        run: |
+          set -euo pipefail
+          # samples/ 若未提交则跳过依赖样例的检查，只跑清单校验与自带运行时自检
+          sample=""
+          for f in samples/*.ofd; do
+            [ -f "$f" ] && { sample="$f"; break; }
+          done
+          if [ -n "$sample" ]; then
+            python scripts/validate.py "$sample"
+          else
+            echo "::warning::samples/ 下没有 .ofd，跳过端到端与批量回归"
+            python scripts/validate.py --no-sample
+          fi
+
+      - name: Warm wheel cache key
+        id: wheels-key
+        run: echo "key=${{ runner.os }}-${{ env.TARGET_ARCH }}-wheels-${{ hashFiles('requirements.txt') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore wheel cache
+        uses: actions/cache@v4
+        with:
+          path: .wheels-cache
+          key: ${{ steps.wheels-key.outputs.key }}
+
+      - name: Build offline package
+        run: python scripts/package_offline.py --arch "$TARGET_ARCH" --dist dist
+
+      - name: Generate checksum
+        run: |
+          set -euo pipefail
+          # 用 glob 找产物：仓库目录名变了也不影响
+          pkg=$(ls -1 "dist/"*-offline-${PLATFORM}.difypkg)
+          echo "打包产物: $pkg"
+          cd dist
+          sha256sum "$(basename "$pkg")" | tee SHA256SUMS.txt
+
+      - name: Write job summary
+        run: |
+          set -euo pipefail
+          pkg=$(ls -1 "dist/"*-offline-${PLATFORM}.difypkg)
+
+          # 从包内容直接算出摘要信息，避免再依赖外部脚本。
+          # 分隔符两侧不留空格，方便下面用 IFS='|' 直接切分。
+          stats=$(python -c '
+          import sys, zipfile, re
+          z = zipfile.ZipFile(sys.argv[1])
+          names = z.namelist()
+          wheels = [n for n in names if n.startswith("wheels/") and n.endswith(".whl")]
+          mb = sum(i.file_size for i in z.infolist()) / 1048576
+          m = re.search(r"^\s*-\s*(amd64|arm64)\s*$",
+                        z.read("manifest.yaml").decode(), re.MULTILINE)
+          arch = m.group(1) if m else "?"
+          runtime = [n for n in names if n.startswith("bin/runtime/bin/")]
+          windows = any(n.endswith("java.exe") for n in runtime)
+          print("%d|%.2f|%d|%s|%s" % (
+              len(wheels), mb, len(names), arch, "Windows!" if windows else "Linux"))
+          ' "$pkg")
+          IFS='|' read -r n_wheels size_mb n_entries m_arch runtime_os <<< "$stats"
+
+          {
+            echo "## $(basename "$pkg")"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 目标平台 | \`${PLATFORM}\` |"
+            echo "| 构建 runner | \`${RUNNER_OS} / ${RUNNER_ARCH}\` |"
+            echo "| dify CLI | \`${DIFY_CLI_VERSION}\` |"
+            echo "| 压缩后 | $(du -h "$pkg" | cut -f1) |"
+            echo "| 解压后 | ${size_mb} MB |"
+            echo "| 包内条目 | ${n_entries} |"
+            echo "| wheel 数 | ${n_wheels} |"
+            echo "| manifest arch | ${m_arch} |"
+            echo "| 内置运行时 | ${runtime_os} |"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "> 安装前记得放宽 Dify 的 \`PLUGIN_MAX_PACKAGE_SIZE\` / \`NGINX_CLIENT_MAX_BODY_SIZE\` /"
+            echo "> \`FORCE_VERIFYING_SIGNATURE\`，详见 README。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+          if-no-files-found: error
+          retention-days: 30

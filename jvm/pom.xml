@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.ofdrwconverter</groupId>
+  <artifactId>ofdrw-text-cli</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <name>ofdrw-text-cli</name>
+  <description>OFD -> plain text command line wrapper around ofdrw-converter TextExporter</description>
+
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <ofdrw.version>2.4.0</ofdrw.version>
+  </properties>
+
+  <dependencies>
+    <!-- OFDRW 文档导出模块，提供 TextExporter -->
+    <dependency>
+      <groupId>org.ofdrw</groupId>
+      <artifactId>ofdrw-converter</artifactId>
+      <version>${ofdrw.version}</version>
+      <exclusions>
+        <!--
+          本插件只用 TextExporter（纯文本提取），不涉及 PDF / 图片 / SVG / HTML 导出，
+          也不做国密签名的验签。下面这些依赖只服务于那几条代码路径，
+          剔除后 fat jar 从 ~31MB 降到 ~11MB —— 这是为了满足
+          Dify 插件包「解压后必须小于 50MB」的硬性限制。
+          如果将来需要新增其它导出能力，请同步删掉对应的 exclusion。
+        -->
+        <!-- PDF 导出（PDFExporterIText / PDFExporterPDFBox） -->
+        <exclusion>
+          <groupId>com.itextpdf</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.pdfbox</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <!-- SVG / HTML 导出（SVGExporter / HTMLExporter，基于 Batik） -->
+        <exclusion>
+          <groupId>org.apache.xmlgraphics</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <!-- 图片导出（ImageExporter 的 TIFF 支持） -->
+        <exclusion>
+          <groupId>com.twelvemonkeys.imageio</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.twelvemonkeys.common</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <!-- 国密算法 / 数字签名校验 -->
+        <!-- 注意：BouncyCastle 不能剔除！OFDReader 初始化时会注册 SM3 摘要算法
+             （org.bouncycastle.jcajce.provider.digest.SM3$Digest），去掉会直接
+             NoClassDefFoundError 导致任何 OFD 都打不开。 -->
+        <!-- JDK 自带 java.xml 已提供这些包，剔除可避免 split package 警告 -->
+        <exclusion>
+          <groupId>xml-apis</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>ofdrw-text-cli</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.5.3</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <shadedArtifactAttached>false</shadedArtifactAttached>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>com.ofdrwconverter.cli.Main</mainClass>
+                </transformer>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                    <exclude>module-info.class</exclude>
+                    <exclude>META-INF/versions/*/module-info.class</exclude>
+                    <!--
+                      多版本 jar（MR-JAR）覆盖类。最终 fat jar 的 MANIFEST 里没有
+                      Multi-Release: true，JVM 本来就会忽略这些条目，留着纯属浪费体积
+                      （BouncyCastle 一家就有 3MB）。
+                    -->
+                    <exclude>META-INF/versions/**</exclude>
+                    <!-- 各依赖的 maven 元数据 -->
+                    <exclude>META-INF/maven/**</exclude>
+                    <!-- BouncyCastle 的后量子密码实现，OFD 只用到 SM2/SM3/SM4 -->
+                    <exclude>org/bouncycastle/pqc/**</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

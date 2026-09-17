@@ -1,0 +1,44 @@
+# Java 构建产物（bin/ 下的最终产物需要提交，target/ 不需要）
+jvm/target/
+jvm/build.log
+bin/runtime.bak.*/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地环境
+.env
+
+# 开发期参考资料 / 临时文件
+.sdk-ref/
+.sdk.tar.gz
+.tree.json
+.res.json
+.rel.json
+.jdeps.txt
+.probe.txt
+# 构建 / 打包 / 校验日志（均为过程产物）
+*.log
+*.difypkg
+
+# 离线打包的暂存目录 / wheel 缓存与探针
+.offline-build/
+.wheels-cache/
+.wheels-probe/
+.wheels-probe.log
+
+# 打包产物
+dist/
+
+# 样本目录里测试产生的输出
+samples/*.txt
+samples/*.json
+
+# IDE
+.idea/
+.vscode/
+*.iml

@@ -1,0 +1,46 @@
+# 打包时忽略的内容：只保留插件运行必需的 Python 代码、清单与 bin/ 下的 Java 产物。
+# 注意：不要忽略 bin/，它是插件自带的可执行 jar 与 Java 运行时。
+# 但旧运行时的备份目录不需要打包。
+bin/runtime.bak.*/
+
+# Java 源码工程与构建缓存
+jvm/target/
+jvm/build.log
+jvm/
+
+# 辅助脚本与样本
+scripts/
+samples/
+
+# CI 配置：只服务于构建，不属于插件运行时内容
+.github/
+
+# 打包产物与离线打包暂存目录
+dist/
+*.difypkg
+.offline-build/
+.wheels-cache/
+.wheels-probe/
+
+# 开发期参考资料
+.sdk-ref/
+.sdk.tar.gz
+.tree.json
+.res.json
+.rel.json
+.jdeps.txt
+.probe.txt
+
+# Python 杂项
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地配置
+.env
+
+# 内部工作记录与构建日志：不属于插件运行时内容，绝不能打进交付包
+.workbuddy/
+*.log
