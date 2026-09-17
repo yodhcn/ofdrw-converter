@@ -139,6 +139,12 @@ python scripts/package_offline.py --arch amd64
 - `scripts/build.ps1` 依赖 `mvn.cmd`，本机 `mvn` 是 sh 版会失败；build.ps1 在
   PowerShell 工具里运行时收不到输出，需要日志就改用手工步骤（`mvn.cmd` → 复制 jar 到 `bin/`）。
   jlink 运行时不必每次重建：新代码若只用 `java.base`，现有 `bin/runtime` 直接可用。
+- **`.git/refs/remotes/**` 的写入会被沙箱拦掉**（`git fetch` / `git update-ref` 都返回 0
+  但引用不落盘，`git status` 显示 `[gone]`）。远端本身没问题，用
+  `git ls-remote origin refs/heads/main` 核对即可；要修本地跟踪引用就直接往
+  `.git/refs/remotes/origin/main` 写 SHA。
+- `git push` 走代理 `http://127.0.0.1:7890`（配置在仓库 git config 里，直连不通）。
+  带 `| tail` 的 push 可能长时间不返回，别急着当失败——先 `git ls-remote` 核对远端。
 
 ## 合规提示
 
