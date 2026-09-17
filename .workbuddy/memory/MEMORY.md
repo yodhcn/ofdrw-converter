@@ -36,12 +36,19 @@ jvm/.../Main.java          只关心页码解析 / 异常转 JSON / 编码归一
    打包机侧 `dify plugin package --max-size`（MB，默认 50）；服务端 `PLUGIN_MAX_PACKAGE_SIZE`
    （字节，默认 52428800）+ `NGINX_CLIENT_MAX_BODY_SIZE`（默认 1M）+ `FORCE_VERIFYING_SIGNATURE=false`。
    常规包 45.3 MB 卡在默认值内；离线包 56.2 MB，安装前必须放宽。**仍应尽量压体积，不要因为能放宽就放任**。
+   `package_offline.py` 里**两步打包都显式传 `--max-size`**（`DEFAULT_MAX_SIZE_MB = 500`），
+   不要依赖客户端那个 50 MB 默认值——自带运行时的包本来就贴着这条线。
 3. **BouncyCastle 必须保留**（`OFDReader` 注册 SM3）。
 4. **jlink 模块集固定为** `java.base,java.xml,jdk.charsets,java.logging`，
    不加 `java.desktop`。**不要照抄 jdeps 的输出**。
    `scripts/build.ps1` 与 `scripts/build.sh` 里各有一份，改的时候两处都要同步。
 5. 改动 `jvm/pom.xml` 的 exclusions 后，必须跑构建脚本（含真实样例自检）
    和 `scripts/validate.py`（多样本回归）双保险。
+6. **`.difyignore` 里的 `.git/` 不能删**。`dify plugin package` 不会自动跳过仓库元数据，
+   漏掉它会把 `.git/objects`（本项目 ~33 MB）完整打进包：常规包解压后从 45 MB 涨到 78 MB，
+   报错却是一句含糊的 `Plugin package size is too large`，很容易误判成运行时没压住。
+   `assert_clean_base_package()` 会在常规包打完**立刻**体检包内布局（顶层白名单 + `.git/` 禁区），
+   把这类事故变成第一步就带明确原因的失败。顶层白名单逻辑（`check_layout()`）与第 5 步校验共用。
 
 ## 产物生成方式
 

@@ -52,10 +52,13 @@ org.ofdrw.converter.export.TextExporter
 
 Dify 对插件包大小有上限，**默认是解压后 50 MB**，且客户端与服务端各有一道：
 
-| 位置 | 配置项 | 默认值 |
-| --- | --- | --- |
-| 打包机（`dify plugin package`） | `--max-size`（单位 MB） | 50 |
-| Dify 服务端 plugin_daemon | `PLUGIN_MAX_PACKAGE_SIZE`（单位字节） | 52428800 |
+| 位置 | 配置项 | 默认值 | 本项目 |
+| --- | --- | --- | --- |
+| 打包机（`dify plugin package`） | `--max-size`（单位 MB） | 50 | 显式设 500 |
+| Dify 服务端 plugin_daemon | `PLUGIN_MAX_PACKAGE_SIZE`（单位字节） | 52428800 | 放宽到 524288000 |
+
+打包脚本两步都会显式传 `--max-size`（默认 500），不再依赖客户端那个 50 MB 的默认值——
+自带 Java 运行时的插件本来就贴着这条线，任何一点多余内容都会把构建打挂。
 
 常规包解压后 45.3 MB（`jar 11.0 MB + runtime 34.3 MB`），刚好卡在默认 50 MB 以内。
 为了留出这个余量做了三件事：
@@ -66,7 +69,7 @@ Dify 对插件包大小有上限，**默认是解压后 50 MB**，且客户端�
 | 剔除 MR-JAR 覆盖类 `META-INF/versions/**`（fat jar 未声明 `Multi-Release`，JVM 本来就会忽略）与 BouncyCastle 的后量子密码包 `org/bouncycastle/pqc/**` | jar 15 MB → 11 MB |
 | jlink 只保留 `java.base,java.xml,jdk.charsets,java.logging`，**不要 `java.desktop`** | runtime 47 MB → 34.3 MB |
 
-两个反直觉但关键的结论，改动时请务必注意：
+三条反直觉但关键的结论，改动时请务必注意：
 
 1. **BouncyCastle 不能剔除**。`OFDReader` 初始化时会注册 SM3 摘要算法，
    去掉后会直接 `NoClassDefFoundError: org/bouncycastle/jcajce/provider/digest/SM3$Digest`，
@@ -80,6 +83,12 @@ Dify 对插件包大小有上限，**默认是解压后 50 MB**，且客户端�
 离线包会把 38 个 Python wheel（10.9 MB）一起塞进去，解压后达到 56.2 MB，
 **必然超过默认的 50 MB**，所以安装前要把上面两个上限一起放宽——见
 [打包离线包](#3-打包离线包无外网环境)。
+
+3. **`.git/` 必须排除**（`.difyignore` 里已有，别删）。`dify plugin package` **不会**自动跳过
+   仓库元数据，而 `.git/objects` 动辄几十 MB：漏掉这一条，常规包会从 45 MB 直接涨到 78 MB，
+   报的却是一句指不到病根的 `Plugin package size is too large`。
+   打包脚本现在会在打出常规包后**立刻体检包内布局**（顶层白名单 + `.git/` 禁区），
+   这类事故会在第一步就带着明确原因失败，而不是等到 CI 里靠体积数字去猜。
 
 ## 目录结构
 
@@ -185,7 +194,8 @@ python scripts/package_offline.py
 脚本会依次完成：
 
 1. **平台预检**：确认 `bin/runtime` 是 Linux 版（Windows 版直接报错退出）；
-2. 先用 `dify plugin package` 打出常规包（复用 `.difyignore`，保证不多带也不遗漏文件）；
+2. 先用 `dify plugin package --max-size 500` 打出常规包（复用 `.difyignore`，保证不多带也不遗漏文件），
+   并立刻体检包内布局——`.git/` 之类混进来会在这里直接报错；
 3. 解压到临时暂存目录；
 4. 按目标运行环境**交叉下载** wheel：`linux` + `amd64`/`arm64` + Python `3.12`
    （Python 版本从 `manifest.yaml` 的 `meta.runner.version` 读取，不写死）；
@@ -206,7 +216,7 @@ python scripts/package_offline.py
 | `--arch arm64` | 产出 `linux-arm64` 版本（默认 `amd64`） |
 | `--refresh` | 忽略 wheel 缓存，强制重新下载 |
 | `--index-url <URL>` | 指定 PyPI 源，默认沿用 pip 配置 |
-| `--max-size <MB>` | 传给 `dify plugin package`，默认按实际体积自动计算 |
+| `--max-size <MB>` | 传给 `dify plugin package`。常规包默认 500；离线包默认按体积自动算，下限也是 500 |
 | `--dist <DIR>` | 输出目录，默认 `dist/` |
 | `--keep-staging` | 保留暂存目录便于排查 |
 

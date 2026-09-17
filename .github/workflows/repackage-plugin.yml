@@ -108,6 +108,9 @@ jobs:
           path: .wheels-cache
           key: ${{ steps.wheels-key.outputs.key }}
 
+      # --max-size 由脚本统一处理（两步打包都显式传，默认 500 MB），
+      # 不依赖 dify CLI 那个 50 MB 的默认上限；服务端侧要同步放宽
+      # PLUGIN_MAX_PACKAGE_SIZE / NGINX_CLIENT_MAX_BODY_SIZE / FORCE_VERIFYING_SIGNATURE。
       - name: Build offline package
         run: python scripts/package_offline.py --arch "$TARGET_ARCH" --dist dist
 

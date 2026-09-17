@@ -12,15 +12,16 @@ Dify 安装工具插件时，会在 plugin_daemon 里为插件建一个 Python �
 ----
 把整条依赖闭包的 wheel 一起塞进插件包，并让 pip 只从包内目录解析：
 
-  1. 先用 ``dify plugin package`` 打出常规包 —— 复用 .difyignore 规则，
-     保证「不多带、不遗漏」文件；
+  1. 先用 ``dify plugin package --max-size 500`` 打出常规包 —— 复用 .difyignore
+     规则，保证「不多带、不遗漏」文件；打完立刻体检包内布局（见 check_layout），
+     仓库元数据（.git/）之类的东西在这一步就会被抓住；
   2. 解压到临时暂存目录；
   3. 交叉下载目标平台的 wheel 到 ``<暂存>/wheels/``
      （linux + amd64/arm64 + 与 manifest 一致的 Python 版本）；
   4. 把暂存目录里 requirements.txt 的首行改成
      ``--no-index --find-links=./wheels/``，并把 manifest.yaml 的 ``meta.arch``
      改成目标架构（包内是平台相关的 JRE 与 wheel，声明必须一致，否则 Dify 拒装）；
-  5. 用 ``dify plugin package --max-size ...`` 重新打包为
+  5. 用 ``dify plugin package --max-size 500`` 重新打包为
      ``dist/ofdrw-converter-offline-linux-<arch>.difypkg``；
   6. 校验：wheel 数量、requirements 改写、内置运行时是否为 Linux 版、
      以及用 pip 做一次「纯离线依赖解析」试算，若闭包有缺口会在这里直接报错。
@@ -112,6 +113,20 @@ BUNDLED_JAVA_NAMES = ("bin/runtime/bin/java", "bin/runtime/bin/java.exe")
 # 只有 Linux 运行时能在 plugin_daemon 容器里跑起来。
 WINDOWS_RUNTIME_MARKERS = ("bin/runtime/bin/java.exe", "bin/runtime/bin/server/jvm.dll")
 
+# ``dify plugin package`` 的客户端默认上限是**解压后 50 MB**，而自带 Java 运行时的
+# 插件本来就贴着这条线（常规包约 45 MB），多带任何一点东西都会直接构建失败。
+# 所以两步打包都显式给 --max-size，取值与服务端侧放宽后的
+# PLUGIN_MAX_PACKAGE_SIZE=524288000 / NGINX_CLIENT_MAX_BODY_SIZE=500M 对齐（见 README）。
+DEFAULT_MAX_SIZE_MB = 500
+
+# 顶层白名单：比逐个拉黑更可靠。任何意外内容（.git/、日志、内部记录、临时目录）
+# 一混进来就会在 check_layout 里被抓住，而不是等到交付后才被发现。
+ALLOWED_TOP_LEVEL = {
+    "manifest.yaml", "main.py", "requirements.txt", "ofdrw_cli.py",
+    "provider", "tools", "_assets", "bin", "wheels",
+    "README.md", ".difyignore", ".gitignore", ".gitattributes", ".env.example",
+}
+
 
 def tree_size(path: Path) -> int:
     total = 0
@@ -135,6 +150,63 @@ def run(cmd: list[str], cwd: Path | None = None, capture: bool = False) -> subpr
 def require(cond: bool, message: str) -> None:
     if not cond:
         sys.exit(f"\n{FAIL} {message}")
+
+
+# ---------------------------------------------------------------------------
+# 包内布局体检
+# ---------------------------------------------------------------------------
+
+
+def list_package(pkg: Path) -> tuple[list[str], int]:
+    with zipfile.ZipFile(pkg) as zf:
+        names = zf.namelist()
+        uncompressed = sum(item.file_size for item in zf.infolist())
+    return names, uncompressed
+
+
+def check_layout(names: list[str]) -> list[str]:
+    """检查包内条目，返回「不该出现的东西」的描述（空列表 = 干净）。
+
+    打包事故几乎都表现为「多带了东西」，而且绝大多数来自被忽略规则漏掉的文件：
+    仓库元数据 ``.git/``、开发期目录、日志。这里用顶层白名单兜底——白名单之外
+    的一切都会被报出来，包括以后新加的临时文件。
+    """
+    unexpected = sorted({n.split("/")[0] for n in names} - ALLOWED_TOP_LEVEL)
+    if not unexpected:
+        return []
+
+    problems = []
+    for name in unexpected:
+        if name == ".git":
+            problems.append(".git/（仓库历史被打进包了）")
+        elif name.startswith("."):
+            problems.append(f"{name}/（未列入白名单的隐藏条目）")
+        else:
+            problems.append(name)
+    return problems
+
+
+def assert_clean_base_package(pkg: Path) -> None:
+    """常规包打完立刻体检：这一步只花几十毫秒，却能挡住最贵的一类事故。
+
+    典型现场：``.difyignore`` 漏了 ``.git/``，于是 30 MB 的 ``.git/objects``
+    被安静地打进包，最后在打包机的 50 MB 上限处报一个「包太大」的含糊错误，
+    让人以为是 Java 运行时体积没压住。
+    """
+    names, uncompressed = list_package(pkg)
+    top = sorted({n.split("/")[0] for n in names})
+    log(f"{INFO} 常规包 {len(names)} 项，解压后 {human(uncompressed)}")
+    log(f"{INFO} 常规包顶层条目: {', '.join(top)}")
+
+    if any(n.startswith(".git/") for n in names):
+        sys.exit(
+            f"\n{FAIL} 常规包里混进了 .git/ —— 仓库历史会被打进交付包。\n"
+            "     先确认 .difyignore 里有 `.git/` 这一条；若仍有，说明该版本 CLI\n"
+            "     没有按预期应用忽略规则，需要在打包前把仓库元数据排除掉。"
+        )
+
+    problems = check_layout(names)
+    require(not problems, "常规包出现非预期顶层条目: " + "; ".join(problems))
 
 
 # ---------------------------------------------------------------------------
@@ -192,14 +264,25 @@ def find_dify_cli() -> str:
     )
 
 
-def build_base_package(cli: str, out_dir: Path, plat_label: str) -> Path:
-    """先用 dify CLI 打出常规包（复用 .difyignore，保证不多带也不遗漏文件）。"""
+def build_base_package(cli: str, out_dir: Path, plat_label: str, max_size_mb: int) -> Path:
+    """先用 dify CLI 打出常规包（复用 .difyignore，保证不多带也不遗漏文件）。
+
+    ``--max-size`` 必须显式给：客户端默认上限是解压后 50 MB，而自带 Java 运行时的
+    包本来就贴着这条线，一旦多带一点内容就会在打包机这一侧直接失败。
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / f"{PLUGIN_NAME}-{plat_label}.difypkg"
-    result = run([cli, "plugin", "package", str(PLUGIN_ROOT), "-o", str(target)], cwd=PLUGIN_ROOT)
+    result = run(
+        [
+            cli, "plugin", "package", str(PLUGIN_ROOT),
+            "-o", str(target), "--max-size", str(max_size_mb),
+        ],
+        cwd=PLUGIN_ROOT,
+    )
     require(result.returncode == 0, f"常规包构建失败（退出码 {result.returncode}）")
     require(target.is_file(), f"未生成 {target}")
     log(f"{OK} 常规包: {target.name} ({human(target.stat().st_size)})")
+    assert_clean_base_package(target)
     return target
 
 
@@ -420,9 +503,10 @@ def patch_manifest_arch(staging: Path, arch: str) -> None:
 
 def repack(cli: str, staging: Path, out_path: Path, max_size_mb: int | None) -> Path:
     if max_size_mb is None:
-        # 客户端默认上限 50 MB（解压后），离线包必然超过，这里按实际体积留 20% 余量。
+        # 自动值只用来兜住「包变大后 --max-size 忘了跟」的情况：按实际体积留 20% 余量。
+        # 下限取 DEFAULT_MAX_SIZE_MB —— 客户端默认的 50 MB 对自带运行时的插件来说太紧。
         total_mb = tree_size(staging) / 1048576
-        max_size_mb = max(50, math.ceil(total_mb * 1.2) + 10)
+        max_size_mb = max(DEFAULT_MAX_SIZE_MB, math.ceil(total_mb * 1.2) + 10)
         log(f"{INFO} 暂存目录 {total_mb:.1f} MB -> 自动设置 --max-size {max_size_mb} MB")
 
     result = run(
@@ -437,13 +521,6 @@ def repack(cli: str, staging: Path, out_path: Path, max_size_mb: int | None) -> 
 # ---------------------------------------------------------------------------
 # 5. 校验
 # ---------------------------------------------------------------------------
-
-
-def list_package(pkg: Path) -> tuple[list[str], int]:
-    with zipfile.ZipFile(pkg) as zf:
-        names = zf.namelist()
-        uncompressed = sum(item.file_size for item in zf.infolist())
-    return names, uncompressed
 
 
 def verify_offline_resolution(
@@ -552,27 +629,14 @@ def verify_package(
         log(f"{FAIL} requirements.txt 未改写为离线形式")
         ok = False
 
-    leaked = [n for n in names if n.startswith((".venv/", "jvm/", "samples/", "scripts/", ".offline-build/"))]
-    if leaked:
-        log(f"{FAIL} 混入了开发期目录: {', '.join(leaked[:5])}")
+    # 顶层白名单 + 禁区检查（与常规包用的是同一份逻辑，见 check_layout）
+    problems = check_layout(names)
+    if problems:
+        log(f"{FAIL} 包内出现非预期顶层条目: {'; '.join(problems)}")
         ok = False
     else:
-        log(f"{OK} 未混入开发期目录（.venv/jvm/samples/scripts 均不在包内）")
-
-    # 顶层白名单：比逐个拉黑更可靠，任何意外文件（日志、内部记录、临时目录）
-    # 一混进来就会在这里被抓住，而不是等到交付后才发现。
-    allowed_top = {
-        "manifest.yaml", "main.py", "requirements.txt", "ofdrw_cli.py",
-        "provider", "tools", "_assets", "bin", "wheels",
-        "README.md", ".difyignore", ".gitignore", ".env.example",
-    }
-    actual_top = {n.split("/")[0] for n in names}
-    unexpected = sorted(actual_top - allowed_top)
-    if unexpected:
-        log(f"{FAIL} 包内出现非预期顶层条目: {', '.join(unexpected)}")
-        ok = False
-    else:
-        log(f"{OK} 顶层条目全部在白名单内（{len(actual_top)} 项）")
+        actual_top = {n.split("/")[0] for n in names}
+        log(f"{OK} 顶层条目全部在白名单内（{len(actual_top)} 项，未混入 .git/.venv/jvm/samples/scripts）")
 
     # 反斜杠路径、绝对路径都是打包事故的信号
     bad_paths = [n for n in names if "\\" in n or n.startswith(("/", "C:"))]
@@ -600,7 +664,11 @@ def main() -> int:
     parser.add_argument("--arch", default="amd64", help="目标架构: amd64(默认) / arm64")
     parser.add_argument("--index-url", default=None, help="PyPI 源（默认沿用 pip 配置）")
     parser.add_argument("--refresh", action="store_true", help="忽略 wheel 缓存，强制重新下载")
-    parser.add_argument("--max-size", type=int, default=None, help="dify CLI 的 --max-size(MB)，默认按体积自动算")
+    parser.add_argument(
+        "--max-size", type=int, default=None,
+        help=f"dify CLI 的 --max-size(MB)。默认常规包用 {DEFAULT_MAX_SIZE_MB}、离线包按体积自动算，"
+             "两端下限都是该值（客户端自带的 50 MB 对自带运行时的插件不够用）",
+    )
     parser.add_argument("--dist", default=None, help="输出目录，默认 <仓库>/dist")
     parser.add_argument("--keep-staging", action="store_true", help="保留暂存目录，便于排查")
     args = parser.parse_args()
@@ -625,7 +693,8 @@ def main() -> int:
 
     # 1. 常规包（复用 .difyignore，保证不遗漏也不多带）
     step("1/5 构建常规包")
-    base_pkg = build_base_package(cli, dist, plat_label)
+    # 两步打包共用同一个上限：显式给出的就用它，否则用 DEFAULT_MAX_SIZE_MB。
+    base_pkg = build_base_package(cli, dist, plat_label, args.max_size or DEFAULT_MAX_SIZE_MB)
 
     # 每次用独立暂存目录：避免递归删除（在受限环境下容易失败），也便于排查
     build_root = PLUGIN_ROOT / ".offline-build"

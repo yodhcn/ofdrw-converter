@@ -3,6 +3,11 @@
 # 但旧运行时的备份目录不需要打包。
 bin/runtime.bak.*/
 
+# 版本控制元数据：CLI 不会自动跳过 .git，漏掉这一条会把整个仓库历史打进去
+# （.git/objects 几十 MB，既撑爆包体积上限，也等于把提交历史交付出去）。
+.git/
+.gitattributes
+
 # Java 源码工程与构建缓存
 jvm/target/
 jvm/build.log
