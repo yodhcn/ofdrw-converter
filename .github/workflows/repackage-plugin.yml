@@ -32,10 +32,8 @@ jobs:
       TARGET_ARCH: ${{ inputs.platform_arm == 'true' && 'arm64' || 'amd64' }}
       PLATFORM: linux-${{ inputs.platform_arm == 'true' && 'arm64' || 'amd64' }}
       ARTIFACT_NAME: ofdrw-converter-offline-linux-${{ inputs.platform_arm == 'true' && 'arm64' || 'amd64' }}
-      # 用 glob 而不是写死插件名：仓库目录名变了也不会对不上
-      ARTIFACT_PATH: |
-        dist/*-offline-${{ inputs.platform_arm == 'true' && 'arm64' || 'amd64' }}.difypkg
-        dist/SHA256SUMS.txt
+      # 注意：这里**不要**再写一个 glob 当产物路径。
+      # 上传用的路径由 "Resolve package path" 步骤从真实文件反解（步骤输出 pkg.path）。
 
     steps:
       - name: Print workflow inputs
@@ -114,19 +112,33 @@ jobs:
       - name: Build offline package
         run: python scripts/package_offline.py --arch "$TARGET_ARCH" --dist dist
 
+      # 把真实产物路径解析一次，后面校验和 / 摘要 / 上传统一用它。
+      # 别让每个步骤各自写 glob：pattern 与真实文件名一旦有出入，
+      # upload-artifact 只会**静默**上传能匹配上的那一部分文件 ——
+      # `if-no-files-found: error` 在有文件匹配时不会报错，于是 artifact 里
+      # 可能只剩下 SHA256SUMS.txt（本项目就踩过：glob 少了 `linux-` 前缀，
+      # 实际产物是 *-offline-linux-arm64.difypkg）。
+      # 放在这里还有个好处：命名一旦漂移，这一步的 ls 会失败，构建当场红。
+      - name: Resolve package path
+        id: pkg
+        run: |
+          set -euo pipefail
+          pkg=$(ls -1 "dist/"*-offline-${PLATFORM}.difypkg)
+          test -f "$pkg"
+          echo "path=$pkg" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$pkg")" >> "$GITHUB_OUTPUT"
+          echo "打包产物: $pkg ($(du -h "$pkg" | cut -f1))"
+
       - name: Generate checksum
         run: |
           set -euo pipefail
-          # 用 glob 找产物：仓库目录名变了也不影响
-          pkg=$(ls -1 "dist/"*-offline-${PLATFORM}.difypkg)
-          echo "打包产物: $pkg"
           cd dist
-          sha256sum "$(basename "$pkg")" | tee SHA256SUMS.txt
+          sha256sum "${{ steps.pkg.outputs.name }}" | tee SHA256SUMS.txt
 
       - name: Write job summary
         run: |
           set -euo pipefail
-          pkg=$(ls -1 "dist/"*-offline-${PLATFORM}.difypkg)
+          pkg="${{ steps.pkg.outputs.path }}"
 
           # 从包内容直接算出摘要信息，避免再依赖外部脚本。
           # 分隔符两侧不留空格，方便下面用 IFS='|' 直接切分。
@@ -147,7 +159,7 @@ jobs:
           IFS='|' read -r n_wheels size_mb n_entries m_arch runtime_os <<< "$stats"
 
           {
-            echo "## $(basename "$pkg")"
+            echo "## ${{ steps.pkg.outputs.name }}"
             echo
             echo "| 项 | 值 |"
             echo "|---|---|"
@@ -173,6 +185,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.ARTIFACT_PATH }}
+          # 用 pkg.path 这个**确定存在**的路径，而不是 glob：
+          # glob 少匹配一个文件时 upload-artifact 不会报错（只上传匹配到的那些），
+          # 曾经因此产出一个只含 SHA256SUMS.txt 的 artifact。
+          path: |
+            ${{ steps.pkg.outputs.path }}
+            dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
