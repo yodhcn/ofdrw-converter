@@ -49,6 +49,12 @@ jvm/.../Main.java          只关心页码解析 / 异常转 JSON / 编码归一
    报错却是一句含糊的 `Plugin package size is too large`，很容易误判成运行时没压住。
    `assert_clean_base_package()` 会在常规包打完**立刻**体检包内布局（顶层白名单 + `.git/` 禁区），
    把这类事故变成第一步就带明确原因的失败。顶层白名单逻辑（`check_layout()`）与第 5 步校验共用。
+7. **包内自带的可执行文件必须自己补权限位**（`dify plugin package` 一条 mode 都不写）。
+   打包侧 `package_offline.py` 的 `patch_unix_modes()` 重写 zip 条目
+   （`create_system=3` + `bin/runtime/bin/*`、`*.so` = 0755），校验段断言可执行位存在；
+   运行侧 `ofdrw_cli.py` 的 `resolve_java()` 在返回前确保可执行（原地 chmod，失败则整棵
+   运行时复制到 `OFDRW_RUNTIME_CACHE` 或临时目录再补，然后按路径缓存）。
+   改动这两处时别只留一层：运行侧那层不依赖解包器是否尊重 zip mode，是最可靠的。
 
 ## 产物生成方式
 

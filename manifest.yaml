@@ -1,4 +1,4 @@
-version: 0.0.1
+version: 0.0.2
 type: plugin
 author: ofdrw
 name: ofdrw-converter
@@ -21,7 +21,8 @@ plugins:
   tools:
     - provider/ofdrw-converter.yaml
 meta:
-  version: 0.0.1
+  # 0.0.2：修复包内缺少 Unix 权限位导致自带 java 无法 exec（Permission denied）
+  version: 0.0.2
   arch:
     - amd64
   runner:

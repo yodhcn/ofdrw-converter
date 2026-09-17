@@ -22,7 +22,9 @@ Dify 安装工具插件时，会在 plugin_daemon 里为插件建一个 Python �
      ``--no-index --find-links=./wheels/``，并把 manifest.yaml 的 ``meta.arch``
      改成目标架构（包内是平台相关的 JRE 与 wheel，声明必须一致，否则 Dify 拒装）；
   5. 用 ``dify plugin package --max-size 500`` 重新打包为
-     ``dist/ofdrw-converter-offline-linux-<arch>.difypkg``；
+     ``dist/ofdrw-converter-offline-linux-<arch>.difypkg``，再用
+     ``patch_unix_modes()`` 给包内条目补写 Unix 权限位
+     （CLI 不写 mode，缺了它自带 java 在 Dify 上起不来）；
   6. 校验：wheel 数量、requirements 改写、内置运行时是否为 Linux 版、
      以及用 pip 做一次「纯离线依赖解析」试算，若闭包有缺口会在这里直接报错。
 
@@ -162,6 +164,54 @@ def list_package(pkg: Path) -> tuple[list[str], int]:
         names = zf.namelist()
         uncompressed = sum(item.file_size for item in zf.infolist())
     return names, uncompressed
+
+
+def entry_modes(pkg: Path) -> dict[str, int]:
+    """读出包内每个条目的 Unix 权限位（低 16 位）。"""
+    with zipfile.ZipFile(pkg) as zf:
+        return {item.filename: (item.external_attr >> 16) & 0xFFFF for item in zf.infolist()}
+
+
+# 需要可执行位的条目：自带运行时 bin/ 下的启动器，以及所有 .so。
+# （.so 严格说只需可读即可 mmap，但真实 JDK 里它们就是 0755，保持一致更不容易踩坑。）
+EXEC_PREFIXES = ("bin/runtime/bin/",)
+EXEC_SUFFIXES = (".so",)
+
+
+def _mode_for(name: str, is_dir: bool) -> int:
+    if is_dir:
+        return 0o755
+    if name.startswith(EXEC_PREFIXES) or name.endswith(EXEC_SUFFIXES):
+        return 0o755
+    return 0o644
+
+
+def patch_unix_modes(pkg: Path) -> int:
+    """把 Unix 权限位补进 .difypkg 的每个条目，返回重写的条目数。
+
+    必须做这一步的原因（实测结论）：``dify plugin package`` 写出的 zip 条目
+    **完全没有权限信息** —— 122/122 条都是 ``create_system=0``(FAT)、``external_attr=0``。
+    解包后文件一律按默认权限落盘，``bin/runtime/bin/java`` 没有可执行位，
+    装到 Dify 上第一次调用就 ``无法启动 Java 进程: [Errno 13] Permission denied``。
+
+    CLI 没有提供设置权限的入口，只能在打包完成后把 zip 重写一遍：
+    给每个条目写上 ``create_system=3``(Unix) 与真实 mode，解包器才会照做。
+    运行时的 ``ofdrw_cli.py`` 里另有一层 chmod 兜底，两边互为保险。
+    """
+    tmp = pkg.with_name(pkg.name + ".tmp")
+    count = 0
+    with zipfile.ZipFile(pkg) as src, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            is_dir = item.filename.endswith("/")
+            mode = _mode_for(item.filename, is_dir)
+            rewritten = zipfile.ZipInfo(item.filename, date_time=item.date_time)
+            rewritten.compress_type = item.compress_type
+            rewritten.create_system = 3  # 3 = Unix：解包器据此决定是否应用 mode
+            rewritten.external_attr = (mode << 16) | (0o040000 if is_dir else 0o100000)
+            dst.writestr(rewritten, src.read(item.filename))
+            count += 1
+    tmp.replace(pkg)
+    return count
 
 
 def check_layout(names: list[str]) -> list[str]:
@@ -593,6 +643,19 @@ def verify_package(
     else:
         log(f"{OK} 插件必需文件齐全（{len(required) + 1} 项，含内置 Java 运行时）")
 
+    # 可执行位：zip 不写 mode 的话，装到 Dify 上 exec 自带 java 会直接 Permission denied。
+    # dify CLI 不写，所以由 patch_unix_modes() 补，这里断言它真的补上了。
+    modes = entry_modes(pkg)
+    java_in_pkg = next((n for n in BUNDLED_JAVA_NAMES if n in names), None)
+    if java_in_pkg:
+        java_mode = modes.get(java_in_pkg, 0)
+        if not java_mode & 0o111:
+            log(f"{FAIL} 包内 {java_in_pkg} 没有可执行位（mode={oct(java_mode)}）")
+            log("       装到 Dify 上调用工具会报「无法启动 Java 进程: Permission denied」")
+            ok = False
+        else:
+            log(f"{OK} 包内 {java_in_pkg} 带可执行位（mode={oct(java_mode)}）")
+
     # 关键守卫：plugin_daemon 是 Linux 容器，Windows 运行时在里面根本起不来。
     # 这个包很容易在 Windows 上误打包（bin/runtime 是构建机的平台产物），
     # 所以在这里硬性拦住，而不是等到安装后调用工具时才失败。
@@ -734,6 +797,10 @@ def main() -> int:
         patch_manifest_arch(staging, args.arch)
         out_path = dist / f"{PLUGIN_NAME}-offline-{plat_label}.difypkg"
         out = repack(cli, staging, out_path, args.max_size)
+
+        # dify CLI 不写 zip 权限位，这里补上，否则装到 Dify 上自带 java 起不来。
+        patched = patch_unix_modes(out)
+        log(f"{OK} 已为 {patched} 个包内条目补写 Unix 权限位（bin/runtime/bin/* = 0755）")
 
         step("5/5 校验")
         ok = verify_package(

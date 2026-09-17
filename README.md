@@ -69,7 +69,7 @@ Dify 对插件包大小有上限，**默认是解压后 50 MB**，且客户端�
 | 剔除 MR-JAR 覆盖类 `META-INF/versions/**`（fat jar 未声明 `Multi-Release`，JVM 本来就会忽略）与 BouncyCastle 的后量子密码包 `org/bouncycastle/pqc/**` | jar 15 MB → 11 MB |
 | jlink 只保留 `java.base,java.xml,jdk.charsets,java.logging`，**不要 `java.desktop`** | runtime 47 MB → 34.3 MB |
 
-三条反直觉但关键的结论，改动时请务必注意：
+四条反直觉但关键的结论，改动时请务必注意：
 
 1. **BouncyCastle 不能剔除**。`OFDReader` 初始化时会注册 SM3 摘要算法，
    去掉后会直接 `NoClassDefFoundError: org/bouncycastle/jcajce/provider/digest/SM3$Digest`，
@@ -80,15 +80,24 @@ Dify 对插件包大小有上限，**默认是解压后 50 MB**，且客户端�
    那是因为 jar 里还留着 `ofdrw-graphics2d`、`ofdrw-font`、`ujmp` 等
    只在渲染/导出路径上才加载的类——它们不会被 `TextExporter` 触达。
 
-离线包会把 38 个 Python wheel（10.9 MB）一起塞进去，解压后达到 56.2 MB，
-**必然超过默认的 50 MB**，所以安装前要把上面两个上限一起放宽——见
-[打包离线包](#3-打包离线包无外网环境)。
-
 3. **`.git/` 必须排除**（`.difyignore` 里已有，别删）。`dify plugin package` **不会**自动跳过
    仓库元数据，而 `.git/objects` 动辄几十 MB：漏掉这一条，常规包会从 45 MB 直接涨到 78 MB，
    报的却是一句指不到病根的 `Plugin package size is too large`。
    打包脚本现在会在打出常规包后**立刻体检包内布局**（顶层白名单 + `.git/` 禁区），
    这类事故会在第一步就带着明确原因失败，而不是等到 CI 里靠体积数字去猜。
+4. **自带的可执行文件必须自己补权限位**。`dify plugin package` 写出的 zip **不含任何权限信息**
+   （实测 122/122 条都是 `create_system=0`(FAT)、`external_attr=0`），解包后
+   `bin/runtime/bin/java` 只是一个普通只读文件，第一次调用就
+   `无法启动 Java 进程: [Errno 13] Permission denied`。CLI 没有设置权限的入口，所以两道保险都要在：
+   - 打包侧：`patch_unix_modes()` 重写 zip，给每个条目写上 `create_system=3`(Unix) 与真实 mode
+     （`bin/runtime/bin/*` 与 `*.so` 为 0755），校验段还会断言可执行位确实存在；
+   - 运行侧：`resolve_java()` 返回前确保可执行 —— 先原地 `chmod 0755`，
+     失败（插件目录只读）就把**整棵**运行时复制到可写目录再补（`bin/java` 靠 rpath
+     `$ORIGIN/../lib` 找 `lib/server/libjvm.so`，只搬一个文件是残的）。
+
+离线包会把 38 个 Python wheel（10.9 MB）一起塞进去，解压后达到 56.2 MB，
+**必然超过默认的 50 MB**，所以安装前要把上面两个上限一起放宽——见
+[打包离线包](#3-打包离线包无外网环境)。
 
 ## 目录结构
 
@@ -348,6 +357,7 @@ java -jar ofdrw-text-cli.jar --input <file.ofd> [--output <out.txt>]
 | --- | --- | --- |
 | `OFDRW_TIMEOUT` | `180` | 单次转换的子进程超时（秒） |
 | `OFDRW_JAVA_HOME` | 空 | 外部 Java 目录，优先级高于插件自带运行时 |
+| `OFDRW_RUNTIME_CACHE` | 系统临时目录 | 运行时被搬迁时的落脚目录。仅在插件目录只读（改不了权限位）时才会用到；若容器 `/tmp` 是 `noexec`，把它指向一个可执行目录 |
 
 ## 依赖版本
 
